@@ -27,23 +27,24 @@
             top: 20px;
             left: 50%;
             transform: translateX(-50%);
-            font-size: 24px;
+            font-size: 20px;
             font-weight: bold;
             letter-spacing: 2px;
             text-shadow: 0 0 10px #00f3ff;
             pointer-events: none;
             display: flex;
-            gap: 40px;
+            gap: 30px;
         }
         #instructions {
             position: absolute;
-            bottom: 20px;
+            bottom: 15px;
             left: 50%;
             transform: translateX(-50%);
             text-align: center;
-            color: #888;
-            font-size: 14px;
+            color: #aaa;
+            font-size: 13px;
             pointer-events: none;
+            line-height: 1.5;
         }
     </style>
 </head>
@@ -51,9 +52,14 @@
     <div id="ui">
         <div>СЧЕТ: <span id="score">0</span></div>
         <div>ЖИЗНИ: <span id="lives">3</span></div>
+        <div>ЩИТ: <span id="shieldStatus">ГОТОВ</span></div>
+        <div>УЛЬТА: <span id="ultStatus">ГОТОВА</span></div>
     </div>
     <canvas id="gameCanvas" width="800" height="600"></canvas>
-    <div id="instructions">Подключите геймпад (левый стик — движение, кнопка A / триггеры — огонь) или используйте WASD + Пробел</div>
+    <div id="instructions">
+        🎮 <strong>Геймпад:</strong> Левый стик — Движение | <strong>X (Квадрат/Нижняя)</strong> — Стрельба<br>
+        🛡️ <strong>LB / L1</strong> — Щит (неуязвимость на 3 сек) | 💥 <strong>Y / Triangle (Верхняя)</strong> — Ультимативный удар
+    </div>
 
     <script>
         const canvas = document.getElementById('gameCanvas');
@@ -68,13 +74,20 @@
             y: canvas.height - 80,
             radius: 20,
             speed: 6,
-            color: '#00f3ff'
+            color: '#00f3ff',
+            shieldActive: false,
+            shieldTimer: 0,
+            shieldCooldown: 0,
+            ultCooldown: 0
         };
 
         let bullets = [];
         let enemies = [];
         let particles = [];
         let keys = {};
+
+        // Защита от залипания кнопок геймпада
+        let prevButtonStates = {};
 
         window.addEventListener('keydown', e => keys[e.code] = true);
         window.addEventListener('keyup', e => keys[e.code] = false);
@@ -88,14 +101,15 @@
                 speed: 2 + Math.random() * 3,
                 color: '#ff0055'
             });
-            setTimeout(spawnEnemy, 1000 - Math.min(score * 5, 700));
+            setTimeout(spawnEnemy, 900 - Math.min(score * 4, 600));
         }
 
         let lastShootTime = 0;
         function handleInput() {
-            // Клавиатура
             let dx = 0;
             let dy = 0;
+
+            // Клавиатура (движение)
             if (keys['KeyW'] || keys['ArrowUp']) dy -= 1;
             if (keys['KeyS'] || keys['ArrowDown']) dy += 1;
             if (keys['KeyA'] || keys['ArrowLeft']) dx -= 1;
@@ -106,44 +120,110 @@
                 dy *= 0.7071;
             }
 
-            player.x += dx * player.speed;
-            player.y += dy * player.speed;
-
-            // Геймпад
+            // Обработка Геймпада
             const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-            if (gamepads[0]) {
-                const gp = gamepads[0];
+            const gp = gamepads[0];
+
+            if (gp) {
                 const deadzone = 0.2;
-                let axisX = gp.axes[0];
-                let axisY = gp.axes[1];
+                let axisX = gp.axes[0]; // Левый стик X
+                let axisY = gp.axes[1]; // Левый стик Y
 
-                if (Math.abs(axisX) > deadzone || Math.abs(axisY) > deadzone) {
-                    player.x += axisX * player.speed;
-                    player.y += axisY * player.speed;
-                }
+                if (Math.abs(axisX) > deadzone) dx = axisX;
+                if (Math.abs(axisY) > deadzone) dy = axisY;
 
-                // Кнопка A (0) или Триггеры (7, 5) для стрельбы
-                if (gp.buttons[0].pressed || gp.buttons[7].pressed || gp.buttons[5].pressed) {
+                // Кнопка X (обычно кнопка 0 в стандарте геймпада: Крестик на PS или A на Xbox/Nintendo, либо проверим 2 для Квадрата/X)
+                // В стандарте HTML5 Gamepad API: 
+                // 0 = A / Cross (нижняя)
+                // 2 = X / Square (левая) -> Назначаем её на стрельбу по твоему запросу
+                const isShooting = gp.buttons[2].pressed || gp.buttons[0].pressed || gp.buttons[7].pressed;
+                if (isShooting) {
                     shoot();
                 }
+
+                // Кнопка щита: LB / L1 (обычно кнопка 4)
+                const isShieldPressed = gp.buttons[4].pressed;
+                if (isShieldPressed && !prevButtonStates[4] && player.shieldCooldown <= 0) {
+                    activateShield();
+                }
+                prevButtonStates[4] = isShieldPressed;
+
+                // Кнопка ульты: Y / Triangle (обычно кнопка 3 вверху)
+                const isUltPressed = gp.buttons[3].pressed;
+                if (isUltPressed && !prevButtonStates[3] && player.ultCooldown <= 0) {
+                    activateUltimate();
+                }
+                prevButtonStates[3] = isUltPressed;
+
+            } else {
+                // Стрельба с клавиатуры (Пробел)
+                if (keys['Space']) {
+                    shoot();
+                }
+                // Щит с клавиатуры (Shift)
+                if (keys['ShiftLeft'] && player.shieldCooldown <= 0) {
+                    activateShield();
+                }
+                // Ульта с клавиатуры (KeyE)
+                if (keys['KeyE'] && player.ultCooldown <= 0) {
+                    activateUltimate();
+                }
             }
 
-            // Стрельба с клавиатуры (Пробел)
-            if (keys['Space']) {
-                shoot();
-            }
+            // Применяем движение (теперь независимо от стрельбы)
+            player.x += dx * player.speed;
+            player.y += dy * player.speed;
 
             // Границы экрана
             player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
             player.y = Math.max(player.radius, Math.min(canvas.height - player.radius, player.y));
+
+            // Кудауны
+            if (player.shieldTimer > 0) {
+                player.shieldTimer--;
+                if (player.shieldTimer <= 0) {
+                    player.shieldActive = false;
+                }
+            }
+            if (player.shieldCooldown > 0) player.shieldCooldown--;
+            if (player.ultCooldown > 0) player.ultCooldown--;
+
+            updateUI();
         }
 
         function shoot() {
             const now = Date.now();
-            if (now - lastShootTime > 150) {
+            if (now - lastShootTime > 130) {
                 bullets.push({ x: player.x, y: player.y - player.radius, speed: 10, radius: 4 });
                 lastShootTime = now;
             }
+        }
+
+        function activateShield() {
+            player.shieldActive = true;
+            player.shieldTimer = 180; // 3 секунды при 60 кадрах/сек
+            player.shieldCooldown = 300; // 5 секунд кулдаун
+            createExplosion(player.x, player.y, '#00f3ff');
+        }
+
+        function activateUltimate() {
+            player.ultCooldown = 600; // 10 секунд кулдаун
+            // Уничтожаем всех врагов на экране и даем очки
+            enemies.forEach(enemy => {
+                createExplosion(enemy.x, enemy.y, '#ffff00');
+                score += 15;
+            });
+            enemies = [];
+            document.getElementById('score').innerText = score;
+            
+            // Вспышка экрана ульты
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        function updateUI() {
+            document.getElementById('shieldStatus').innerText = player.shieldActive ? 'АКТИВЕН' : (player.shieldCooldown > 0 ? Math.ceil(player.shieldCooldown / 60) + 'с' : 'ГОТОВ');
+            document.getElementById('ultStatus').innerText = player.ultCooldown > 0 ? Math.ceil(player.ultCooldown / 60) + 'с' : 'ГОТОВА';
         }
 
         function createExplosion(x, y, color) {
@@ -180,11 +260,15 @@
                 const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
                 if (dist < player.radius + enemy.radius) {
                     enemies.splice(eIndex, 1);
-                    createExplosion(player.x, player.y, '#00f3ff');
-                    lives--;
-                    document.getElementById('lives').innerText = lives;
-                    if (lives <= 0) {
-                        isGameOver = true;
+                    if (player.shieldActive) {
+                        createExplosion(enemy.x, enemy.y, '#00f3ff');
+                    } else {
+                        createExplosion(player.x, player.y, '#ff0055');
+                        lives--;
+                        document.getElementById('lives').innerText = lives;
+                        if (lives <= 0) {
+                            isGameOver = true;
+                        }
                     }
                 }
 
@@ -222,6 +306,19 @@
             ctx.fillStyle = '#ffffff';
             ctx.fillRect(canvas.width * 0.2, (Date.now() * 0.05) % canvas.height, 2, 2);
             ctx.fillRect(canvas.width * 0.7, (Date.now() * 0.02) % canvas.height, 1, 1);
+
+            // Щит игрока
+            if (player.shieldActive) {
+                ctx.save();
+                ctx.strokeStyle = '#00f3ff';
+                ctx.lineWidth = 3;
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = '#00f3ff';
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, player.radius + 10, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+            }
 
             // Игрок (неоновый треугольник)
             ctx.save();
